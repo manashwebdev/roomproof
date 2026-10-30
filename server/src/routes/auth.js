@@ -1,0 +1,11 @@
+const r=require('express').Router(),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),{User}=require('../models'),auth=require('../auth');
+const sign=u=>jwt.sign({id:u._id},process.env.JWT_SECRET,{expiresIn:'30d'});
+const pub=u=>({id:u._id,name:u.name,email:u.email,city:u.city});
+r.post('/register',async(q,s,n)=>{try{const{name,email,password,city}=q.body;
+ if(!name||!email||!password||password.length<6)return s.status(400).json({error:'Name, email and a 6+ character password are required'});
+ if(await User.findOne({email}))return s.status(409).json({error:'Email already registered'});
+ const u=await User.create({name,email,city,passwordHash:await bcrypt.hash(password,10)});s.json({token:sign(u),user:pub(u)})}catch(e){n(e)}});
+r.post('/login',async(q,s,n)=>{try{const u=await User.findOne({email:(q.body.email||'').toLowerCase()});
+ if(!u||!await bcrypt.compare(q.body.password||'',u.passwordHash))return s.status(401).json({error:'Wrong email or password'});s.json({token:sign(u),user:pub(u)})}catch(e){n(e)}});
+r.get('/me',auth,async(q,s)=>s.json(pub(await User.findById(q.userId))));
+module.exports=r;

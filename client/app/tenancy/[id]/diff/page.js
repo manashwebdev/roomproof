@@ -1,0 +1,10 @@
+'use client';import{useEffect,useState}from'react';import Link from'next/link';import{api,img,short}from'../../../../lib/api';import useAuth from'../../../../lib/useAuth';
+export default function Diff({params}){useAuth();const[d,setD]=useState(null),[k,setK]=useState(0),[x,setX]=useState(50),[pick,setPick]=useState({});
+useEffect(()=>{api(`/tenancies/${params.id}/diff`).then(setD)},[]);if(!d)return<p className="mute">Loading…</p>;
+const s=d[k];const sel=pick[s.spotKey];const mark=v=>setPick({...pick,[s.spotKey]:v});
+return(<><div className="row between"><div><p className="mono mute">Damage Diff</p><h2>{s.label}</h2></div><Link className="btn seal" href={`/tenancy/${params.id}/claim?s=${Object.keys(pick).filter(a=>pick[a]).join(',')}`}>Build deposit letter ({Object.values(pick).filter(Boolean).length})</Link></div>
+<div className="row" style={{alignItems:'flex-start',marginTop:16}}><div style={{width:200,display:'flex',flexDirection:'column',gap:8}}>{d.map((a,i)=>(<button key={a.spotKey} className="btn" style={{justifyContent:'space-between',borderColor:i===k?'var(--seal)':undefined}} onClick={()=>setK(i)}>{a.label}<span className={'chip '+(a.changed?'bad':'')}>{a.changed?'changed':a.before&&a.after?'same':'—'}</span></button>))}</div>
+<div style={{flex:1,minWidth:300}}>{s.before&&s.after?(<div className="cmp" style={{backgroundImage:`url(${img(s.before.imageUrl)})`}}><div className="top-layer" style={{backgroundImage:`url(${img(s.after.imageUrl)})`,clipPath:`inset(0 ${100-x}% 0 0)`}}/><div className="h" style={{left:x+'%'}}/>
+<input type="range" aria-label="Compare move-out and move-in" value={x} onChange={e=>setX(+e.target.value)}/></div>):<div className="card">This spot needs both a move-in and a move-out photo.</div>}
+{s.before&&s.after&&<p className="mono mute">Left: move-out · Right: move-in · move-in hash {short(s.before.sha256)}</p>}
+{s.before&&s.after&&<div className="row"><button className="btn" onClick={()=>mark(sel?null:{status:'disputed',deductionAmount:0})}>{sel?'Remove from letter':'Add to deposit letter'}</button></div>}</div></div></>)}

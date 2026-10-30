@@ -1,0 +1,51 @@
+const r=require('express').Router(),multer=require('multer'),path=require('path'),fs=require('fs'),crypto=require('crypto');
+const{Tenancy,Inspection,Evidence,Claim}=require('../models'),auth=require('../auth'),{sha,link,verify,ZERO}=require('../chain');
+const up=multer({dest:path.join(__dirname,'../../uploads'),limits:{fileSize:12*1024*1024}});
+const SPOTS=['Entry door','Living wall north','Ceiling','Window','Floor tile','Bedroom wall','Wardrobe','Bathroom tap','Basin','Toilet','Kitchen platform','Switchboard'].map(l=>({key:l.toLowerCase().replace(/\W+/g,'-'),label:l}));
+r.use(auth);
+const own=async(q)=>{const t=await Tenancy.findOne({_id:q.params.id,userId:q.userId});if(!t)throw Object.assign(new Error('Tenancy not found'),{status:404});return t};
+const chainOf=id=>Evidence.find({tenancyId:id}).sort({receivedAt:1,_id:1});
+r.get('/tenancies',async(q,s)=>{const l=await Tenancy.find({userId:q.userId}).sort('-createdAt').lean();
+ for(const t of l){t.photos=await Evidence.countDocuments({tenancyId:t._id})}s.json(l)});
+r.post('/tenancies',async(q,s,n)=>{try{const b=q.body;if(!b.title)return s.status(400).json({error:'Give the room a name'});
+ const t=await Tenancy.create({...b,userId:q.userId,spots:b.spots?.length?b.spots:SPOTS,shareToken:crypto.randomBytes(12).toString('hex')});
+ await Inspection.create({tenancyId:t._id,type:'move_in'});s.json(t)}catch(e){n(e)}});
+r.get('/tenancies/:id',async(q,s,n)=>{try{const t=await own(q);const ins=await Inspection.find({tenancyId:t._id}).sort('createdAt');
+ const ev=await chainOf(t._id);s.json({tenancy:t,inspections:ins,evidence:ev,chain:verify(ev)})}catch(e){n(e)}});
+r.patch('/tenancies/:id',async(q,s,n)=>{try{const t=await own(q);for(const k of['title','address','landlordName','landlordPhone','depositAmount','endDate','status'])if(k in q.body)t[k]=q.body[k];await t.save();s.json(t)}catch(e){n(e)}});
+r.delete('/tenancies/:id',async(q,s,n)=>{try{const t=await own(q);await Promise.all([Evidence.deleteMany({tenancyId:t._id}),Inspection.deleteMany({tenancyId:t._id}),t.deleteOne()]);s.json({ok:true})}catch(e){n(e)}});
+r.post('/tenancies/:id/inspections',async(q,s,n)=>{try{const t=await own(q);const type=q.body.type||'move_out';s.json(await Inspection.create({tenancyId:t._id,type}))}catch(e){n(e)}});
+r.get('/inspections/:id',async(q,s,n)=>{try{const i=await Inspection.findById(q.params.id);await own({params:{id:i.tenancyId},userId:q.userId});s.json({inspection:i,evidence:await Evidence.find({inspectionId:i._id}).sort('receivedAt')})}catch(e){n(e)}});
+r.post('/inspections/:id/evidence',up.single('image'),async(q,s,n)=>{try{
+ const i=await Inspection.findById(q.params.id);if(!i)return s.status(404).json({error:'Inspection not found'});await own({params:{id:i.tenancyId},userId:q.userId});
+ if(i.status==='sealed')return s.status(409).json({error:'This inspection is sealed'});
+ if(!q.file)return s.status(400).json({error:'Photo missing'});
+ const real=sha(fs.readFileSync(q.file.path));
+ if(real!==q.body.sha256){fs.unlinkSync(q.file.path);return s.status(400).json({error:'Photo changed in transit. Retake it.'})}
+ const ext=path.extname(q.file.originalname||'')||'.jpg',name=real+ext;fs.renameSync(q.file.path,path.join(q.file.destination,name));
+ const last=await Evidence.findOne({tenancyId:i.tenancyId}).sort({receivedAt:-1,_id:-1});const prev=last?last.chainHash:ZERO;
+ const at=q.body.capturedAt?new Date(q.body.capturedAt):new Date();
+ const geo=q.body.lat?{lat:+q.body.lat,lng:+q.body.lng,acc:+q.body.acc}:undefined;
+ const e=await Evidence.create({inspectionId:i._id,tenancyId:i.tenancyId,spotKey:q.body.spotKey,imageUrl:'/uploads/'+name,sha256:real,prevHash:prev,chainHash:link(prev,real,q.body.spotKey,at),capturedAt:at,severity:q.body.severity||'ok',note:q.body.note,geo});
+ s.json(e)}catch(e){n(e)}});
+r.patch('/evidence/:id',async(q,s,n)=>{try{const e=await Evidence.findById(q.params.id);const i=await Inspection.findById(e.inspectionId);await own({params:{id:e.tenancyId},userId:q.userId});
+ if(i.status==='sealed')return s.status(409).json({error:'Sealed records cannot change'});if(q.body.severity)e.severity=q.body.severity;if('note'in q.body)e.note=q.body.note;await e.save();s.json(e)}catch(e){n(e)}});
+r.post('/inspections/:id/seal',async(q,s,n)=>{try{const i=await Inspection.findById(q.params.id);await own({params:{id:i.tenancyId},userId:q.userId});
+ const last=await Evidence.findOne({inspectionId:i._id}).sort({receivedAt:-1,_id:-1});if(!last)return s.status(400).json({error:'Add at least one photo first'});
+ i.status='sealed';i.sealedAt=new Date();i.rootHash=last.chainHash;await i.save();s.json(i)}catch(e){n(e)}});
+// latest photo per spot for move_in vs move_out
+async function diff(tid){const ins=await Inspection.find({tenancyId:tid});const t=await Tenancy.findById(tid);
+ const latest=async type=>{const i=ins.filter(x=>x.type===type).pop();const m={};if(i)(await Evidence.find({inspectionId:i._id}).sort('receivedAt')).forEach(e=>m[e.spotKey]=e);return m};
+ const a=await latest('move_in'),b=await latest('move_out');
+ return t.spots.map(sp=>{const before=a[sp.key],after=b[sp.key];
+  const changed=!!(before&&after&&(after.severity!==before.severity&&after.severity!=='ok'||after.severity==='damage'));
+  return{spotKey:sp.key,label:sp.label,before,after,changed}})}
+r.get('/tenancies/:id/diff',async(q,s,n)=>{try{const t=await own(q);s.json(await diff(t._id))}catch(e){n(e)}});
+r.post('/tenancies/:id/claim',async(q,s,n)=>{try{const t=await own(q);const d=await diff(t._id);const pick=q.body.items||[];
+ const items=pick.map(p=>{const x=d.find(y=>y.spotKey===p.spotKey)||{};return{spotKey:p.spotKey,beforeId:x.before?._id,afterId:x.after?._id,status:p.status||'disputed',deductionAmount:+p.deductionAmount||0,note:p.note}});
+ const total=items.reduce((a,b)=>a+b.deductionAmount,0);
+ const lines=items.map((x,k)=>{const sp=t.spots.find(z=>z.key===x.spotKey);return `${k+1}. ${sp?.label}: ${x.note||'See sealed photos'} (proposed deduction Rs ${x.deductionAmount})`}).join('\n');
+ const text=`To ${t.landlordName||'the Landlord'},\n\nSubject: Security deposit for ${t.title}, ${t.address||''}\n\nI am writing about my security deposit of Rs ${t.depositAmount||0}. My move-in condition was recorded in a sealed, hash-chained photo record, which you can check at the link shared with you. Spots reviewed:\n\n${lines||'No deductions are claimed.'}\n\nTotal deduction under discussion: Rs ${total}. I request refund of Rs ${Math.max((t.depositAmount||0)-total,0)} within 15 days.\n\nRegards,\n${q.body.tenantName||'Tenant'}`;
+ s.json(await Claim.create({tenancyId:t._id,items,letterText:text}))}catch(e){n(e)}});
+r.get('/claims/:id/letter',async(q,s,n)=>{try{const c=await Claim.findById(q.params.id);await own({params:{id:c.tenancyId},userId:q.userId});s.type('text/plain').send(c.letterText)}catch(e){n(e)}});
+module.exports=r;

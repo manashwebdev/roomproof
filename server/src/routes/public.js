@@ -1,0 +1,15 @@
+const r=require('express').Router(),multer=require('multer')({storage:require('multer').memoryStorage(),limits:{fileSize:12*1024*1024}});
+const{Tenancy,Inspection,Evidence,Ack}=require('../models'),{sha,verify}=require('../chain');
+r.get('/share/:token',async(q,s,n)=>{try{const t=await Tenancy.findOne({shareToken:q.params.token}).lean();if(!t)return s.status(404).json({error:'Link not found'});
+ const ins=await Inspection.find({tenancyId:t._id}).sort('createdAt').lean();const ev=await Evidence.find({tenancyId:t._id}).sort({receivedAt:1,_id:1}).lean();
+ const acks=await Ack.find({inspectionId:{$in:ins.map(i=>i._id)}}).lean();
+ s.json({tenancy:{title:t.title,address:t.address,landlordName:t.landlordName,spots:t.spots},inspections:ins,evidence:ev.map(({geo,...e})=>e),acks,chain:verify(ev)})}catch(e){n(e)}});
+r.post('/share/:token/acknowledge',async(q,s,n)=>{try{const t=await Tenancy.findOne({shareToken:q.params.token});if(!t)return s.status(404).json({error:'Link not found'});
+ const i=await Inspection.findOne({_id:q.body.inspectionId,tenancyId:t._id,status:'sealed'});if(!i)return s.status(400).json({error:'Only sealed records can be acknowledged'});
+ if(!q.body.landlordName)return s.status(400).json({error:'Enter your name'});
+ s.json(await Ack.create({inspectionId:i._id,landlordName:q.body.landlordName,comment:q.body.comment,ip:q.ip}))}catch(e){n(e)}});
+r.post('/verify',multer.single('image'),async(q,s,n)=>{try{if(!q.file)return s.status(400).json({error:'Choose a photo'});
+ const h=sha(q.file.buffer);const e=await Evidence.findOne({sha256:h}).lean();
+ if(!e)return s.json({match:false,sha256:h});const i=await Inspection.findById(e.inspectionId).lean();const t=await Tenancy.findById(e.tenancyId).lean();
+ s.json({match:true,sha256:h,capturedAt:e.capturedAt,spotKey:e.spotKey,room:t.title,inspectionType:i.type,sealed:i.status==='sealed',chainHash:e.chainHash})}catch(e){n(e)}});
+module.exports=r;

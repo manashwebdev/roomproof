@@ -1,0 +1,12 @@
+require('dotenv').config();
+const express=require('express'),mongoose=require('mongoose'),cors=require('cors'),path=require('path'),rate=require('express-rate-limit');
+const app=express();
+app.use(cors({origin:process.env.CLIENT_URL||'http://localhost:3000'}));
+app.use(express.json({limit:'1mb'}));
+app.use('/api',rate({windowMs:60000,max:300}));
+app.use('/uploads',express.static(path.join(__dirname,'../uploads')));
+app.use('/api/auth',require('./routes/auth'));
+app.use('/api',require('./routes/public'));
+app.use('/api',require('./routes/tenancies'));
+app.use((e,req,res,next)=>{console.error(e);res.status(e.status||500).json({error:e.message||'Server error'})});
+mongoose.connect(process.env.MONGO_URI).then(()=>app.listen(process.env.PORT||5000,()=>console.log('RoomProof API running')));
